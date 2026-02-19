@@ -198,9 +198,17 @@ async def play_next(guild_id, vc):
     currently_playing[guild_id] = (audio_url, title, duration)
     song_start_time[guild_id] = time.time()
     
-    # FFmpeg options for stable streaming
-    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-    options = "-vn -q:a 5"
+    # FFmpeg options optimized for Discord streaming
+    # before_options: connection stability
+    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -hide_banner -loglevel warning"
+    
+    # options: audio processing optimized for Discord (48kHz stereo PCM)
+    # -vn: no video
+    # -acodec pcm_s16le: raw PCM format (most reliable for Discord)
+    # -ar 48000: resample to Discord's 48kHz requirement
+    # -ac 2: stereo output
+    # -bufsize 1024k: buffer size for streaming stability
+    options = "-vn -acodec pcm_s16le -ar 48000 -ac 2 -bufsize 1024k"
     
     source = discord.PCMVolumeTransformer(
         discord.FFmpegPCMAudio(audio_url, before_options=before_options, options=options)
