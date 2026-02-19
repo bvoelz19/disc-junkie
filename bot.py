@@ -104,12 +104,17 @@ async def fetch_audio_url(url):
         return None, None, None
 
 def format_duration(seconds):
-    """Convert seconds to MM:SS format"""
+    """Convert seconds to HH:MM:SS format"""
     if not seconds:
-        return "00:00"
-    minutes = int(seconds) // 60
-    secs = int(seconds) % 60
-    return f"{minutes}:{secs:02d}"
+        return "0:00:00"
+    total_secs = int(seconds)
+    hours = total_secs // 3600
+    minutes = (total_secs % 3600) // 60
+    secs = total_secs % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    else:
+        return f"{minutes}:{secs:02d}"
 
 @bot.tree.command(name="ping", description="Test if bot is responsive")
 async def ping(interaction: discord.Interaction):
@@ -362,8 +367,8 @@ async def on_reaction_remove(reaction, user):
     if reaction_key not in reaction_to_song:
         return
     
-    # Get the song that was added for this emoji
-    audio_url, title = reaction_to_song[reaction_key]
+    # Get the song that was added for this emoji (now includes duration)
+    audio_url, title, duration = reaction_to_song[reaction_key]
     guild_id = reaction.message.guild.id
     
     # Get voice client
@@ -387,7 +392,7 @@ async def on_reaction_remove(reaction, user):
     
     # Find the song in the queue and remove it
     removed = False
-    for idx, (queued_url, queued_title) in enumerate(queue):
+    for idx, (queued_url, queued_title, queued_duration) in enumerate(queue):
         if queued_url == audio_url and queued_title == title:
             queue.pop(idx)
             queue_per_guild[guild_id] = deque(queue)
