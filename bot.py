@@ -30,6 +30,7 @@ queue_per_guild = {}
 # Store search results for emoji reactions
 search_results_cache = {}  # {message_id: [(url, title), (url, title), ...]}
 search_result_emojis = ['1️⃣', '2️⃣', '3️⃣']
+reaction_to_song = {}  # {(message_id, emoji): (url, title)} - track what each emoji selection added
 
 @bot.event
 async def on_ready():
@@ -283,10 +284,62 @@ async def on_reaction_add(reaction, user):
     queue_per_guild[guild_id].append((audio_url, title))
     await reaction.message.reply(f"✅ Added to queue: **{title}**")
     
+    # Store this reaction -> song mapping for potential removal later
+    reaction_to_song[(reaction.message.id, emoji)] = (audio_url, title)
+    
     # If nothing playing, start
     if not vc.is_playing() and not vc.is_paused():
         await play_next(guild_id, vc)
     
     # Keep cache alive for more selections - don't delete here
+
+# Reaction removal handler
+@bot.event
+async def on_reaction_remove(reaction, user):
+    """Handle emoji reaction removal from search result messages"""
+    # Ignore bot reactions
+    if user.bot:
+        return
+    
+    # Check if this is a tracked reaction
+    emoji = str(reaction.emoji)
+    reaction_key = (reaction.message.id, emoji)
+    
+    if reaction_key not in reaction_to_song:
+        return
+    
+    # Get the song that was added for this emoji
+    audio_url, title = reaction_to_song[reaction_key]
+    guild_id = reaction.message.guild.id
+    
+    # Get voice client
+    vc = reaction.message.guild.voice_client
+    if not vc or not vc.is_connected():
+        return
+    
+    # Ensure queue exists
+    if guild_id not in queue_per_guild:
+        return
+    
+    queue = list(queue_per_guild[guild_id])
+    
+    # Find the song in the queue
+    removed = False
+    for idx, (queued_url, queued_title) in enumerate(queue):
+        if queued_url == audio_url and queued_title == title:
+            # Don't remove if it's currently playing
+            if idx == 0 and vc.is_playing():
+                await reaction.message.reply(f"⚠️ Cannot remove **{title}** - it's currently playing!")
+                break
+            
+            # Remove from queue
+            queue.pop(idx)
+            queue_per_guild[guild_id] = deque(queue)
+            await reaction.message.reply(f"🗑️ Removed from queue: **{title}**")
+            removed = True
+            break
+    
+    # Clean up the reaction mapping
+    del reaction_to_song[reaction_key]
 
 bot.run(TOKEN)
