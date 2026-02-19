@@ -31,6 +31,7 @@ queue_per_guild = {}
 search_results_cache = {}  # {message_id: [(url, title), (url, title), ...]}
 search_result_emojis = ['1️⃣', '2️⃣', '3️⃣']
 reaction_to_song = {}  # {(message_id, emoji): (url, title)} - track what each emoji selection added
+currently_playing = {}  # {guild_id: (audio_url, title)} - track what song is currently playing
 
 @bot.event
 async def on_ready():
@@ -169,9 +170,13 @@ async def play(interaction: discord.Interaction, query: str = None):
 
 async def play_next(guild_id, vc):
     if guild_id not in queue_per_guild or not queue_per_guild[guild_id]:
+        if guild_id in currently_playing:
+            del currently_playing[guild_id]
         await vc.disconnect()
         return
     audio_url, title = queue_per_guild[guild_id].popleft()
+    # Track what's currently playing
+    currently_playing[guild_id] = (audio_url, title)
     source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(audio_url))
     vc.play(source, after=lambda e: asyncio.create_task(on_track_end(e, guild_id, vc)))
     # Inform channel via channel id stored in interaction? We'll send via a stored channel dict; for now ignore
@@ -179,6 +184,9 @@ async def play_next(guild_id, vc):
 async def on_track_end(error, guild_id, vc):
     if error:
         logging.error(f"Error finished playing: {error}")
+    # Clear currently playing
+    if guild_id in currently_playing:
+        del currently_playing[guild_id]
     # Start next
     await play_next(guild_id, vc)
 
@@ -228,6 +236,8 @@ async def stop(interaction: discord.Interaction):
         vc.stop()
         vc.disconnect()
     queue_per_guild[guild_id] = deque()
+    if guild_id in currently_playing:
+        del currently_playing[guild_id]
     await interaction.response.send_message("🛑 Stopped playback and cleared queue.")
 
 # Reaction handler for search results
@@ -321,18 +331,20 @@ async def on_reaction_remove(reaction, user):
     if guild_id not in queue_per_guild:
         return
     
+    # Check if this song is currently playing
+    if guild_id in currently_playing:
+        current_url, current_title = currently_playing[guild_id]
+        if current_url == audio_url and current_title == title:
+            await reaction.message.reply(f"⚠️ Cannot remove **{title}** - it's currently playing!")
+            del reaction_to_song[reaction_key]
+            return
+    
     queue = list(queue_per_guild[guild_id])
     
-    # Find the song in the queue
+    # Find the song in the queue and remove it
     removed = False
     for idx, (queued_url, queued_title) in enumerate(queue):
         if queued_url == audio_url and queued_title == title:
-            # Don't remove if it's currently playing
-            if idx == 0 and vc.is_playing():
-                await reaction.message.reply(f"⚠️ Cannot remove **{title}** - it's currently playing!")
-                break
-            
-            # Remove from queue
             queue.pop(idx)
             queue_per_guild[guild_id] = deque(queue)
             await reaction.message.reply(f"🗑️ Removed from queue: **{title}**")
