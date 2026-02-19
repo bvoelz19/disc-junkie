@@ -5,6 +5,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
 import asyncio
+import time
 
 # Setup logging
 logs_dir = os.path.join(os.path.dirname(__file__), "logs")
@@ -31,7 +32,8 @@ queue_per_guild = {}
 search_results_cache = {}  # {message_id: [(url, title), (url, title), ...]}
 search_result_emojis = ['1️⃣', '2️⃣', '3️⃣']
 reaction_to_song = {}  # {(message_id, emoji): (url, title)} - track what each emoji selection added
-currently_playing = {}  # {guild_id: (audio_url, title)} - track what song is currently playing
+currently_playing = {}  # {guild_id: (audio_url, title, duration)} - track what song is currently playing
+song_start_time = {}  # {guild_id: timestamp} - when current song started playing
 
 @bot.event
 async def on_ready():
@@ -83,7 +85,7 @@ async def search_youtube(query):
         return []
 
 async def fetch_audio_url(url):
-    """Fetch the actual audio URL and title from a YouTube URL"""
+    """Fetch the actual audio URL, title, and duration from a YouTube URL"""
     try:
         # Try bestaudio first, but fallback to best if not available
         ydl_opts = {
@@ -95,10 +97,19 @@ async def fetch_audio_url(url):
             info = ydl.extract_info(url, download=False)
             audio_url = info['url']
             title = info.get('title', 'Unknown')
-            return audio_url, title
+            duration = info.get('duration', 0)  # Duration in seconds
+            return audio_url, title, duration
     except Exception as e:
         logging.error(f'Error fetching audio: {e}')
-        return None, None
+        return None, None, None
+
+def format_duration(seconds):
+    """Convert seconds to MM:SS format"""
+    if not seconds:
+        return "00:00"
+    minutes = int(seconds) // 60
+    secs = int(seconds) % 60
+    return f"{minutes}:{secs:02d}"
 
 @bot.tree.command(name="ping", description="Test if bot is responsive")
 async def ping(interaction: discord.Interaction):
@@ -135,12 +146,13 @@ async def play(interaction: discord.Interaction, query: str = None):
     
     if is_url:
         # Direct URL provided, fetch audio
-        audio_url, title = await fetch_audio_url(query)
+        audio_url, title, duration = await fetch_audio_url(query)
         if audio_url is None:
             return await interaction.followup.send(f"❌ Error fetching audio from URL")
         
-        queue_per_guild[guild_id].append((audio_url, title))
-        await interaction.followup.send(f"📥 Added to queue: **{title}**")
+        queue_per_guild[guild_id].append((audio_url, title, duration))
+        duration_str = format_duration(duration)
+        await interaction.followup.send(f"📥 Added to queue: **{title}** ({duration_str})")
         
         if not vc.is_playing() and not vc.is_paused():
             await play_next(guild_id, vc)
@@ -172,11 +184,14 @@ async def play_next(guild_id, vc):
     if guild_id not in queue_per_guild or not queue_per_guild[guild_id]:
         if guild_id in currently_playing:
             del currently_playing[guild_id]
+        if guild_id in song_start_time:
+            del song_start_time[guild_id]
         await vc.disconnect()
         return
-    audio_url, title = queue_per_guild[guild_id].popleft()
-    # Track what's currently playing
-    currently_playing[guild_id] = (audio_url, title)
+    audio_url, title, duration = queue_per_guild[guild_id].popleft()
+    # Track what's currently playing and when it started
+    currently_playing[guild_id] = (audio_url, title, duration)
+    song_start_time[guild_id] = time.time()
     source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(audio_url))
     vc.play(source, after=lambda e: asyncio.create_task(on_track_end(e, guild_id, vc)))
     # Inform channel via channel id stored in interaction? We'll send via a stored channel dict; for now ignore
@@ -184,9 +199,11 @@ async def play_next(guild_id, vc):
 async def on_track_end(error, guild_id, vc):
     if error:
         logging.error(f"Error finished playing: {error}")
-    # Clear currently playing
+    # Clear currently playing and start time
     if guild_id in currently_playing:
         del currently_playing[guild_id]
+    if guild_id in song_start_time:
+        del song_start_time[guild_id]
     # Start next
     await play_next(guild_id, vc)
 
@@ -194,12 +211,35 @@ async def on_track_end(error, guild_id, vc):
 @bot.tree.command(name="queue", description="Show the current song queue")
 async def queue_cmd(interaction: discord.Interaction):
     guild_id = interaction.guild.id
+    
+    msg = ""
+    
+    # Show "Now Playing" if something is playing
+    if guild_id in currently_playing:
+        _, title, duration = currently_playing[guild_id]
+        elapsed = 0
+        if guild_id in song_start_time:
+            elapsed = int(time.time() - song_start_time[guild_id])
+        
+        elapsed_str = format_duration(elapsed)
+        duration_str = format_duration(duration)
+        msg += f"🎵 **Now Playing:** {title}\n"
+        msg += f"⏱️  {elapsed_str} / {duration_str}\n\n"
+    
+    # Show queue
     if guild_id not in queue_per_guild or not queue_per_guild[guild_id]:
-        return await interaction.response.send_message("Queue is empty.")
+        if msg:
+            msg += "_Queue is empty._"
+        else:
+            msg = "Queue is empty."
+        return await interaction.response.send_message(msg)
+    
     queue = list(queue_per_guild[guild_id])
-    msg = "**Queue:**\n"
-    for idx, (_, title) in enumerate(queue, start=1):
-        msg += f"{idx}. {title}\n"
+    msg += "**Queue:**\n"
+    for idx, (_, title, duration) in enumerate(queue, start=1):
+        duration_str = format_duration(duration)
+        msg += f"{idx}. {title} ({duration_str})\n"
+    
     await interaction.response.send_message(msg)
 
 # Skip command
@@ -238,6 +278,8 @@ async def stop(interaction: discord.Interaction):
     queue_per_guild[guild_id] = deque()
     if guild_id in currently_playing:
         del currently_playing[guild_id]
+    if guild_id in song_start_time:
+        del song_start_time[guild_id]
     await interaction.response.send_message("🛑 Stopped playback and cleared queue.")
 
 # Reaction handler for search results
@@ -279,23 +321,25 @@ async def on_reaction_add(reaction, user):
     
     # Check if song is already in queue (prevent duplicates)
     queue = list(queue_per_guild[guild_id])
-    for queued_url, queued_title in queue:
+    for queued_item in queue:
+        queued_url = queued_item[0]
         if queued_url == selected_url:
             await reaction.message.reply(f"⚠️ **{selected_title}** is already in the queue!")
             return
     
     # Fetch audio from the selected URL
-    audio_url, title = await fetch_audio_url(selected_url)
+    audio_url, title, duration = await fetch_audio_url(selected_url)
     if audio_url is None:
         await reaction.message.reply("❌ Error fetching audio for the selected song.")
         return
     
-    # Add to queue
-    queue_per_guild[guild_id].append((audio_url, title))
-    await reaction.message.reply(f"✅ Added to queue: **{title}**")
+    # Add to queue (with duration)
+    queue_per_guild[guild_id].append((audio_url, title, duration))
+    duration_str = format_duration(duration)
+    await reaction.message.reply(f"✅ Added to queue: **{title}** ({duration_str})")
     
     # Store this reaction -> song mapping for potential removal later
-    reaction_to_song[(reaction.message.id, emoji)] = (audio_url, title)
+    reaction_to_song[(reaction.message.id, emoji)] = (audio_url, title, duration)
     
     # If nothing playing, start
     if not vc.is_playing() and not vc.is_paused():
@@ -333,8 +377,8 @@ async def on_reaction_remove(reaction, user):
     
     # Check if this song is currently playing
     if guild_id in currently_playing:
-        current_url, current_title = currently_playing[guild_id]
-        if current_url == audio_url and current_title == title:
+        current_url, current_title, _ = currently_playing[guild_id]
+        if current_url == audio_url:
             await reaction.message.reply(f"⚠️ Cannot remove **{title}** - it's currently playing!")
             del reaction_to_song[reaction_key]
             return
