@@ -55,7 +55,6 @@ async def search_youtube(query):
     """Search YouTube and return first 3 results"""
     try:
         ydl_opts = {
-            'format': 'bestaudio',
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,  # Don't download, just extract info
@@ -67,7 +66,13 @@ async def search_youtube(query):
         results = []
         if 'entries' in info:
             for entry in info['entries'][:3]:
-                url = entry.get('url')
+                # Build proper YouTube URL from video ID
+                video_id = entry.get('id')
+                if not video_id:
+                    url = entry.get('url')
+                else:
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+                
                 title = entry.get('title', 'Unknown')
                 results.append((url, title))
         return results
@@ -78,7 +83,12 @@ async def search_youtube(query):
 async def fetch_audio_url(url):
     """Fetch the actual audio URL and title from a YouTube URL"""
     try:
-        ydl_opts = {'format': 'bestaudio', 'quiet': True, 'no_warnings': True}
+        # Try bestaudio first, but fallback to best if not available
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             audio_url = info['url']
@@ -246,28 +256,37 @@ async def on_reaction_add(reaction, user):
     selected_url, selected_title = results[idx]
     guild_id = reaction.message.guild.id
     
+    # Get voice client
+    vc = reaction.message.guild.voice_client
+    if not vc or not vc.is_connected():
+        await reaction.message.reply("❌ Bot is not in a voice channel.")
+        return
+    
+    # Ensure queue exists
+    if guild_id not in queue_per_guild:
+        queue_per_guild[guild_id] = deque()
+    
+    # Check if song is already in queue (prevent duplicates)
+    queue = list(queue_per_guild[guild_id])
+    for queued_url, queued_title in queue:
+        if queued_url == selected_url:
+            await reaction.message.reply(f"⚠️ **{selected_title}** is already in the queue!")
+            return
+    
     # Fetch audio from the selected URL
     audio_url, title = await fetch_audio_url(selected_url)
     if audio_url is None:
         await reaction.message.reply("❌ Error fetching audio for the selected song.")
         return
     
-    # Get voice client and add to queue
-    vc = reaction.message.guild.voice_client
-    if vc and vc.is_connected():
-        if guild_id not in queue_per_guild:
-            queue_per_guild[guild_id] = deque()
-        
-        queue_per_guild[guild_id].append((audio_url, title))
-        await reaction.message.reply(f"✅ Added to queue: **{title}**")
-        
-        # If nothing playing, start
-        if not vc.is_playing() and not vc.is_paused():
-            await play_next(guild_id, vc)
-    else:
-        await reaction.message.reply("❌ Bot is not in a voice channel.")
+    # Add to queue
+    queue_per_guild[guild_id].append((audio_url, title))
+    await reaction.message.reply(f"✅ Added to queue: **{title}**")
     
-    # Clean up cache
-    del search_results_cache[reaction.message.id]
+    # If nothing playing, start
+    if not vc.is_playing() and not vc.is_paused():
+        await play_next(guild_id, vc)
+    
+    # Keep cache alive for more selections - don't delete here
 
 bot.run(TOKEN)
