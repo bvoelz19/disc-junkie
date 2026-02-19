@@ -200,15 +200,15 @@ async def play_next(guild_id, vc):
     
     # FFmpeg options optimized for Discord streaming
     # before_options: connection stability
-    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -hide_banner -loglevel warning"
+    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
     
-    # options: audio processing optimized for Discord (48kHz stereo PCM)
+    # options: minimal processing - let discord.py handle the encoding
     # -vn: no video
-    # -acodec pcm_s16le: raw PCM format (most reliable for Discord)
-    # -ar 48000: resample to Discord's 48kHz requirement
-    # -ac 2: stereo output
-    # -bufsize 1024k: buffer size for streaming stability
-    options = "-vn -acodec pcm_s16le -ar 48000 -ac 2 -bufsize 1024k"
+    # -f s16le: output as signed 16-bit little-endian PCM
+    # -ar 48000: Discord requires 48kHz
+    # -ac 2: Discord requires stereo
+    # This avoids double-encoding and corruption from FFmpeg→Opus conversion
+    options = "-vn -f s16le -ar 48000 -ac 2"
     
     source = discord.PCMVolumeTransformer(
         discord.FFmpegPCMAudio(audio_url, before_options=before_options, options=options)
