@@ -27,6 +27,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 from collections import deque
 queue_per_guild = {}
 
+# Store search results for emoji reactions
+search_results_cache = {}  # {message_id: [(url, title), (url, title), ...]}
+search_result_emojis = ['1️⃣', '2️⃣', '3️⃣']
+
 @bot.event
 async def on_ready():
     logging.info(f'{bot.user} has connected to Discord!')
@@ -47,48 +51,110 @@ async def on_ready():
     except Exception as e:
         logging.error(f'Failed to sync commands: {e}')
 
+async def search_youtube(query):
+    """Search YouTube and return first 3 results"""
+    try:
+        ydl_opts = {
+            'format': 'bestaudio',
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,  # Don't download, just extract info
+            'default_search': 'ytsearch3'
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch3:{query}", download=False)
+        
+        results = []
+        if 'entries' in info:
+            for entry in info['entries'][:3]:
+                url = entry.get('url')
+                title = entry.get('title', 'Unknown')
+                results.append((url, title))
+        return results
+    except Exception as e:
+        logging.error(f'Error searching YouTube: {e}')
+        return []
+
+async def fetch_audio_url(url):
+    """Fetch the actual audio URL and title from a YouTube URL"""
+    try:
+        ydl_opts = {'format': 'bestaudio', 'quiet': True, 'no_warnings': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            audio_url = info['url']
+            title = info.get('title', 'Unknown')
+            return audio_url, title
+    except Exception as e:
+        logging.error(f'Error fetching audio: {e}')
+        return None, None
+
 @bot.tree.command(name="ping", description="Test if bot is responsive")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 Pong! Latency: {round(bot.latency * 1000)}ms")
 
-@bot.tree.command(name="play", description="Add a track to the queue")
-async def play(interaction: discord.Interaction, url: str):
+@bot.tree.command(name="play", description="Add a track to the queue or search for one")
+async def play(interaction: discord.Interaction, query: str = None):
     await interaction.response.defer()
     guild_id = interaction.guild.id
+    
     if not interaction.user.voice:
         return await interaction.followup.send("You must be in a voice channel!")
+    
     voice_channel = interaction.user.voice.channel
+    
     # Connect or move
     vc = interaction.guild.voice_client
     if vc is None:
         vc = await voice_channel.connect()
     elif vc.channel != voice_channel:
         await vc.move_to(voice_channel)
+    
     # Ensure queue exists
     if guild_id not in queue_per_guild:
         queue_per_guild[guild_id] = deque()
-    # Fetch audio info
-    ydl_opts = { 'format': 'bestaudio', 'quiet': True, 'no_warnings': True }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=False)
-            except Exception:
-                ydl_opts['default_search'] = 'ytsearch'
-                info = ydl.extract_info(f"ytsearch:{url}", download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
-            audio_url = info['url']
-            title = info.get('title', 'Unknown')
-    except Exception as e:
-        logging.error(f'Error fetching audio: {e}')
-        return await interaction.followup.send(f"❌ Error fetching audio: {e}")
-    # Add to queue
-    queue_per_guild[guild_id].append((audio_url, title))
-    await interaction.followup.send(f"📥 Added to queue: **{title}**")
-    # If nothing playing, start
-    if not vc.is_playing() and not vc.is_paused():
-        await play_next(guild_id, vc)
+    
+    # If no query provided, search YouTube
+    if query is None:
+        await interaction.followup.send("❌ Please provide a song name or URL. Usage: `/play <song name or URL>`")
+        return
+    
+    # Check if it's a URL or a search query
+    is_url = query.startswith('http://') or query.startswith('https://')
+    
+    if is_url:
+        # Direct URL provided, fetch audio
+        audio_url, title = await fetch_audio_url(query)
+        if audio_url is None:
+            return await interaction.followup.send(f"❌ Error fetching audio from URL")
+        
+        queue_per_guild[guild_id].append((audio_url, title))
+        await interaction.followup.send(f"📥 Added to queue: **{title}**")
+        
+        if not vc.is_playing() and not vc.is_paused():
+            await play_next(guild_id, vc)
+    else:
+        # Search query provided, show search results
+        await interaction.followup.send("🔍 Searching YouTube...")
+        
+        results = await search_youtube(query)
+        if not results:
+            return await interaction.followup.send("❌ No results found for that search.")
+        
+        # Build search results message
+        search_msg = "**Search Results:**\n"
+        for idx, (url, title) in enumerate(results, 1):
+            search_msg += f"{search_result_emojis[idx-1]} **{title}**\n"
+        search_msg += "\nReact with the emoji to select a song!"
+        
+        # Send the message with search results
+        result_msg = await interaction.followup.send(search_msg)
+        
+        # Store search results in cache
+        search_results_cache[result_msg.id] = results
+        
+        # Add emoji reactions to the message
+        for emoji in search_result_emojis[:len(results)]:
+            await result_msg.add_reaction(emoji)
 
 async def play_next(guild_id, vc):
     if guild_id not in queue_per_guild or not queue_per_guild[guild_id]:
@@ -152,5 +218,56 @@ async def stop(interaction: discord.Interaction):
         vc.disconnect()
     queue_per_guild[guild_id] = deque()
     await interaction.response.send_message("🛑 Stopped playback and cleared queue.")
+
+# Reaction handler for search results
+@bot.event
+async def on_reaction_add(reaction, user):
+    """Handle emoji reactions on search result messages"""
+    # Ignore bot reactions
+    if user.bot:
+        return
+    
+    # Check if this is a search result message
+    if reaction.message.id not in search_results_cache:
+        return
+    
+    # Get the emoji and map to index
+    emoji = str(reaction.emoji)
+    try:
+        idx = search_result_emojis.index(emoji)
+    except ValueError:
+        return  # Not a valid search result emoji
+    
+    # Get the selected result
+    results = search_results_cache[reaction.message.id]
+    if idx >= len(results):
+        return
+    
+    selected_url, selected_title = results[idx]
+    guild_id = reaction.message.guild.id
+    
+    # Fetch audio from the selected URL
+    audio_url, title = await fetch_audio_url(selected_url)
+    if audio_url is None:
+        await reaction.message.reply("❌ Error fetching audio for the selected song.")
+        return
+    
+    # Get voice client and add to queue
+    vc = reaction.message.guild.voice_client
+    if vc and vc.is_connected():
+        if guild_id not in queue_per_guild:
+            queue_per_guild[guild_id] = deque()
+        
+        queue_per_guild[guild_id].append((audio_url, title))
+        await reaction.message.reply(f"✅ Added to queue: **{title}**")
+        
+        # If nothing playing, start
+        if not vc.is_playing() and not vc.is_paused():
+            await play_next(guild_id, vc)
+    else:
+        await reaction.message.reply("❌ Bot is not in a voice channel.")
+    
+    # Clean up cache
+    del search_results_cache[reaction.message.id]
 
 bot.run(TOKEN)
