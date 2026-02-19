@@ -197,7 +197,14 @@ async def play_next(guild_id, vc):
     # Track what's currently playing and when it started
     currently_playing[guild_id] = (audio_url, title, duration)
     song_start_time[guild_id] = time.time()
-    source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(audio_url))
+    
+    # FFmpeg options for stable streaming
+    before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+    options = "-vn -q:a 5"
+    
+    source = discord.PCMVolumeTransformer(
+        discord.FFmpegPCMAudio(audio_url, before_options=before_options, options=options)
+    )
     vc.play(source, after=lambda e: bot.loop.create_task(on_track_end(e, guild_id, vc)))
     # Inform channel via channel id stored in interaction? We'll send via a stored channel dict; for now ignore
 
